@@ -1,0 +1,29 @@
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+
+# === Virtual environment ===
+venv/
+env/
+
+# === Dataset (large files) ===
+data/
+*.wav
+*.mp3
+*.csv
+
+# === Model outputs & checkpoints ===
+outputs/
+*.pt
+*.pkl
+*.ckpt
+
+# === IDE / System files ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

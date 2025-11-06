@@ -1,0 +1,13 @@
+transformers>=4.41.0
+datasets
+soundfile
+librosa
+numpy
+pandas
+scikit-learn
+tqdm
+matplotlib
+pyyaml
+accelerate
+peft
+pytorch-crf

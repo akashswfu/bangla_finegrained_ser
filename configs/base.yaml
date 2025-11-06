@@ -1,0 +1,30 @@
+seed: 42
+sample_rate: 16000
+data:
+  # manifest_path: data/manifest.csv
+  manifest_path: data/manifest_split.csv
+  emotions: ["anger","disgust","fear","happy","neutral","sad","surprise"]
+  min_duration: 0.5
+  max_duration: 20.0
+  num_workers: 2
+model:
+  backbone_id: "facebook/wav2vec2-base"
+  freeze_backbone: true
+  head: "gru"
+  hidden_size: 256
+  num_layers: 2
+  dropout: 0.1
+segment:
+  win_sec: 1.0
+  hop_sec: 0.5
+loss:
+  lambda_temp: 0.3
+  lambda_sparse: 0.1
+train:
+  epochs: 200
+  batch_size: 4
+  lr: 2.0e-4
+  grad_accum: 1
+  amp: true
+  weight_decay: 1.0e-4
+out_dir: "outputs"
