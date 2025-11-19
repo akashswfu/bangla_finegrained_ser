@@ -1,5 +1,4 @@
 # src/data.py
-
 import csv
 import numpy as np
 import soundfile as sf
@@ -26,47 +25,61 @@ def _safe_mono_float32(wav: np.ndarray) -> np.ndarray:
     # dtype + finite
     wav = wav.astype(np.float32, copy=False)
     if wav.size == 0 or not np.isfinite(wav).all():
-        # 10 ms silence fallback
-        wav = np.zeros(160, dtype=np.float32)  # assuming 16kHz default; collator will fix again if needed
+        # 10 ms silence fallback (assuming 16kHz default; collator pads anyway)
+        wav = np.zeros(160, dtype=np.float32)
     return wav
+
+
+def compute_class_weights(manifest_path, label_map):
+    import collections
+    cnt = collections.Counter()
+    with open(manifest_path, newline='', encoding='utf-8') as f:
+        for r in csv.DictReader(f):
+            cnt[r['label']] += 1
+    # order by label index (0..C-1)
+    ordered = sorted(label_map, key=lambda k: label_map[k])
+    weights = []
+    for lab in ordered:
+        w = 1.0 / max(1, cnt[lab])
+        weights.append(w)
+    s = sum(weights)
+    weights = [w * len(weights) / s for w in weights]  # normalize
+    return torch.tensor(weights, dtype=torch.float32)
 
 
 class SpeechDataset(Dataset):
     """
     Reads manifest CSV with columns: path,label,speaker,split
-    Example:
+    Example row:
       data/wavs/M_10_EVAN_S_9_NEUTRAL_5.wav,neutral,evan,train
     """
 
     def __init__(self, manifest, split, label_map, sr=16000, min_dur=0.5, max_dur=20.0):
-        self.sr = sr
+        self.sr = int(sr)
         self.label_map = label_map
         self.items = []
 
         with open(manifest, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f, fieldnames=None)
-            # If the CSV has no header row, DictReader will fail.
-            # So we detect header based on the first row having keys.
-            # But most likely your file has header row: path,label,speaker,split
-            header = reader.fieldnames
-            if header is None or not {"path", "label", "split"}.issubset(set(header)):
-                # Try to read with explicit fieldnames
+            # try to use header if present; otherwise fall back
+            reader = csv.DictReader(f)
+            has_header = reader.fieldnames is not None and {"path", "label", "split"}.issubset(set(reader.fieldnames))
+            if not has_header:
                 f.seek(0)
-                reader = csv.DictReader(
-                    f, fieldnames=["path", "label", "speaker", "split"]
-                )
+                reader = csv.DictReader(f, fieldnames=["path", "label", "speaker", "split"])
+
             for r in reader:
+                # skip header row if we forced fieldnames (avoid treating header as data)
+                if not has_header and r["path"] == "path":
+                    continue
+
                 if r.get("split", "").strip().lower() != split:
                     continue
                 path = r.get("path")
                 lab_name = r.get("label")
-                if path is None or lab_name is None:
+                if not path or not lab_name or lab_name not in self.label_map:
                     continue
-                if lab_name not in self.label_map:
-                    continue
-                lab = self.label_map[lab_name]
 
-                # duration check using audio metadata
+                # quick duration check using metadata (cheap)
                 try:
                     info = sf.info(path)
                     dur_meta = float(info.frames) / float(info.samplerate)
@@ -76,22 +89,14 @@ class SpeechDataset(Dataset):
                 if dur_meta < min_dur or dur_meta > max_dur:
                     continue
 
-                # Keep (path, label); duration will be recomputed after resample for accuracy
-                self.items.append((path, lab))
-
-        # Optional: sort for stable batches (not required)
-        # self.items.sort(key=lambda x: x[0])
+                self.items.append((path, self.label_map[lab_name]))
 
     def __len__(self):
         return len(self.items)
 
     def __getitem__(self, i):
         path, lab = self.items[i]
-
-        # read wav
         wav, sr = sf.read(path, dtype="float32", always_2d=False)
-
-        # sanitize to mono/float32
         wav = _safe_mono_float32(wav)
 
         # resample if needed
@@ -99,24 +104,36 @@ class SpeechDataset(Dataset):
             try:
                 wav = librosa.resample(y=wav, orig_sr=sr, target_sr=self.sr)
             except TypeError:
-                # fallback for older librosa signatures
                 wav = librosa.resample(wav, sr, self.sr)
-
             wav = _safe_mono_float32(wav)
 
-        # final clip (safety)
+        # ---------- augmentation ----------
+        if getattr(self, "augment", False):
+            wav = self._augment(wav)
+
+        # sanitize after augmentation
         wav = np.clip(wav, -1.0, 1.0).astype(np.float32, copy=False)
+        dur = float(len(wav)) / float(self.sr)  # duration AFTER augment (important!)
 
-        # recompute duration after resample
-        dur = float(len(wav)) / float(self.sr)
-
-        # return numpy here; collator will convert to tensors
         return {
-            "wav": wav,             # np.ndarray (T,)
-            "label": int(lab),      # python int
-            "dur": dur,             # float
-            "path": path,           # optional for debugging
+            "wav": torch.from_numpy(wav),
+            "label": torch.tensor(lab, dtype=torch.long),
+            "dur": dur,
+            "path": path,
         }
+
+    def _augment(self, wav: np.ndarray) -> np.ndarray:
+        # small, prosody-safe augmentations
+        if np.random.rand() < 0.3:  # ±1.5 dB gain
+            wav = wav * (10 ** (np.random.uniform(-1.5, 1.5) / 20))
+        if np.random.rand() < 0.3:  # tiny white noise
+            wav = wav + np.random.randn(len(wav)).astype('float32') * 0.005
+        if np.random.rand() < 0.2:  # ±3% speed (changes duration → we recompute dur later)
+            rate = float(np.random.uniform(0.97, 1.03))
+            # librosa can throw for very short arrays; guard it
+            if len(wav) > int(0.05 * self.sr):
+                wav = librosa.effects.time_stretch(wav, rate=rate)
+        return wav
 
 
 class Collator:
@@ -130,14 +147,16 @@ class Collator:
         self.sample_rate = int(sample_rate)
 
     def __call__(self, batch):
-        # unpack
         wavs = [b["wav"] for b in batch]
-        labels = [b["label"] for b in batch]
-        durs = [b["dur"] for b in batch]
+        labels = [int(b["label"]) for b in batch]
+        durs = [float(b["dur"]) for b in batch]
 
         # sanitize every wav to mono, 1-D, float32
         wavs_clean = []
         for w in wavs:
+            # if tensor, convert to numpy for processor
+            if isinstance(w, torch.Tensor):
+                w = w.detach().cpu().numpy()
             w = _safe_mono_float32(w)
             if w.size == 0 or not np.isfinite(w).all():
                 w = np.zeros(int(0.01 * self.sample_rate), dtype=np.float32)
@@ -151,69 +170,12 @@ class Collator:
             padding=True,
         )
 
-        input_values = X["input_values"]  # (B, T)
-        attention_mask = X.get(
-            "attention_mask", torch.ones_like(input_values, dtype=torch.long)
-        )
-
-        labels = torch.tensor(labels, dtype=torch.long)
-        # lengths = torch.tensor(durs, dtype=torch.float32) just remove this line
+        input_values = X["input_values"]                      # (B, T) float32
+        attention_mask = X.get("attention_mask", torch.ones_like(input_values, dtype=torch.long))
 
         return {
-            "input_values": input_values,        # (B, T) float32
-            "attention_mask": attention_mask,    # (B, T) long
-            "labels": labels,                    # (B,)   long
-            # "lengths_sec": lengths,              # (B,)   float32
-            "lengths_sec": durs,                 # (B,)   float list
+            "input_values": input_values,                     # (B, T)
+            "attention_mask": attention_mask,                 # (B, T)
+            "labels": torch.tensor(labels, dtype=torch.long), # (B,)
+            "lengths_sec": durs,                              # list of floats (post-augment durations)
         }
-
-
-
-
-# import csv, torch, soundfile as sf, numpy as np
-# from torch.utils.data import Dataset
-# from transformers import AutoProcessor
-# import librosa
-
-
-# class SpeechDataset(Dataset):
-#     def __init__(self, manifest, split, label_map, sr=16000, min_dur=0.5, max_dur=20.0):
-#         self.sr = sr; self.label_map = label_map; self.items = []
-#         with open(manifest, newline='', encoding='utf-8') as f:
-#             reader = csv.DictReader(f)
-#             for r in reader:
-#                 if r['split'] != split: continue
-#                 path = r['path']; lab = self.label_map[r['label']]
-#                 try:
-#                     info = sf.info(path); dur = info.frames / info.samplerate
-#                 except:
-#                     continue
-#                 if dur < min_dur or dur > max_dur: continue
-#                 self.items.append((path, lab, dur))
-
-#     def __len__(self): return len(self.items)
-#     def __getitem__(self, i):
-#         path, lab, dur = self.items[i]
-#         wav, sr = sf.read(path, dtype='float32', always_2d=False)
-#         if wav.ndim == 2: wav = wav.mean(axis=1)
-#         if sr != self.sr:
-#             # import librosa; wav = librosa.resample(wav, sr, self.sr)
-
-#             try:
-#                 wav = librosa.resample(y=wav, orig_sr=sr, target_sr=self.sr)
-#             except TypeError:
-#                 # fallback for older librosa
-#                 wav = librosa.resample(wav, sr, self.sr)
-
-#         wav = np.clip(wav, -1, 1).astype('float32')
-#         return {'wav': torch.from_numpy(wav), 'label': torch.tensor(lab), 'dur': float(dur)}
-
-# class Collator:
-#     def __init__(self, backbone_id: str, sample_rate: int = 16000):
-#         self.processor = AutoProcessor.from_pretrained(backbone_id); self.sample_rate = sample_rate
-#     def __call__(self, batch):
-#         wavs = [b['wav'] for b in batch]; labels = torch.stack([b['label'] for b in batch]); durs = [b['dur'] for b in batch]
-#         X = self.processor(wavs, sampling_rate=self.sample_rate, return_tensors='pt', padding=True)
-#         out = {'input_values': X['input_values'], 'labels': labels, 'lengths_sec': durs}
-#         if 'attention_mask' in X: out['attention_mask'] = X['attention_mask']
-#         return out

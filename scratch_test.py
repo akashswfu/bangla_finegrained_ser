@@ -1,4 +1,13 @@
-from transformers import Wav2Vec2Model
-print("import OK")
-m = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base", use_safetensors=True, local_files_only=False)
-print("model loaded:", m.__class__.__name__)
+import csv, collections
+
+path = "data/manifest_split.csv"   # <-- current file
+cnt = collections.Counter()
+
+with open(path, newline='', encoding="utf-8") as f:
+    r = csv.DictReader(f)
+    for row in r:
+        cnt[row.get("split","").strip().lower()] += 1
+
+print("Split counts in", path)
+for k,v in cnt.items():
+    print(f"  {repr(k)}: {v}")
