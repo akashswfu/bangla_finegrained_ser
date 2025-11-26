@@ -42,8 +42,8 @@ data:
 
 model:
   backbone_id: "facebook/wav2vec2-base"   # later try "microsoft/wavlm-base-plus"
-  freeze_backbone: true
-  unfreeze_top_k: 2                        # <-- unfreeze last 2 transformer blocks
+  freeze_backbone: true                   # <-- unfreeze last 2 transformer blocks
+  unfreeze_top_k: 2     
   head: "gru"
   hidden_size: 256
   num_layers: 2
@@ -59,7 +59,7 @@ loss:
   lambda_sparse: 0.08
 
 train:
-  epochs: 200
+  epochs: 120
   batch_size: 8
   grad_accum: 1
   lr: 2.0e-4
