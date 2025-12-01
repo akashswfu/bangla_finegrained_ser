@@ -1,6 +1,7 @@
 # src/train.py
 
 import argparse, yaml, os, math, torch, torch.nn.functional as F
+import csv  # NEW: for logging to CSV
 from torch.utils.data import DataLoader
 from transformers import logging as hf_logging
 from tqdm import tqdm
@@ -94,6 +95,15 @@ def train_baseline(cfg):
 
     scaler = torch.amp.GradScaler('cuda', enabled=bool(cfg['train']['amp']))
     ensure_dir(cfg['out_dir'])
+
+    # NEW: set up CSV logging file
+    log_dir = os.path.join(cfg['out_dir'], 'logs')
+    ensure_dir(log_dir)
+    baseline_log_path = os.path.join(log_dir, 'baseline_training.csv')
+    with open(baseline_log_path, 'w', newline='') as f_log:
+        writer = csv.writer(f_log)
+        writer.writerow(['epoch', 'train_loss', 'val_macro_f1', 'val_uar'])
+
     best = 0.0
     bad_epochs = 0
     patience = int(cfg['train'].get('early_stop_patience', 8))
@@ -101,6 +111,11 @@ def train_baseline(cfg):
     for ep in range(cfg['train']['epochs']):
         model.train()
         pbar = tqdm(dl_tr, desc=f"BL {ep+1}/{cfg['train']['epochs']}")
+
+        # NEW: accumulate loss per epoch
+        epoch_loss_sum = 0.0
+        n_batches = 0
+
         for i, b in enumerate(pbar):
             x = b['input_values'].to(device)
             m = b.get('attention_mask'); m = m.to(device) if m is not None else None
@@ -118,7 +133,13 @@ def train_baseline(cfg):
                 if scheduler is not None:
                     scheduler.step()
 
+            epoch_loss_sum += float(loss.item())   # NEW
+            n_batches += 1                         # NEW
+
             pbar.set_postfix(loss=float(loss.item()), lr=opt.param_groups[0]['lr'])
+
+        # NEW: mean train loss for this epoch
+        mean_train_loss = epoch_loss_sum / max(1, n_batches)
 
         # ---- validation ----
         model.eval()
@@ -136,6 +157,14 @@ def train_baseline(cfg):
         f1 = macro_f1(ys, yh, num_classes=len(emotions))
         rec = uar(ys, yh, num_classes=len(emotions))
         print(f"Val Macro-F1={f1:.4f} UAR={rec:.4f}")
+
+        # NEW: append epoch stats to CSV log
+        with open(baseline_log_path, 'a', newline='') as f_log:
+            writer = csv.writer(f_log)
+            writer.writerow([ep + 1,
+                             f"{mean_train_loss:.6f}",
+                             f"{f1:.4f}",
+                             f"{rec:.4f}"])
 
         if f1 > best:
             best = f1
@@ -183,6 +212,15 @@ def train_weakseg(cfg):
 
     scaler = torch.amp.GradScaler('cuda', enabled=bool(cfg['train']['amp']))
     ensure_dir(cfg['out_dir'])
+
+    # NEW: CSV logging for weakseg
+    log_dir = os.path.join(cfg['out_dir'], 'logs')
+    ensure_dir(log_dir)
+    weakseg_log_path = os.path.join(log_dir, 'weakseg_training.csv')
+    with open(weakseg_log_path, 'w', newline='') as f_log:
+        writer = csv.writer(f_log)
+        writer.writerow(['epoch', 'train_loss', 'val_macro_f1', 'val_uar'])
+
     best = 0.0
     bad_epochs = 0
     patience = int(cfg['train'].get('early_stop_patience', 8))
@@ -190,6 +228,11 @@ def train_weakseg(cfg):
     for ep in range(cfg['train']['epochs']):
         model.train()
         pbar = tqdm(dl_tr, desc=f"WS {ep+1}/{cfg['train']['epochs']}")
+
+        # NEW: accumulate epoch loss
+        epoch_loss_sum = 0.0
+        n_batches = 0
+
         for i, b in enumerate(pbar):
             x = b['input_values'].to(device)
             m = b.get('attention_mask'); m = m.to(device) if m is not None else None
@@ -215,7 +258,13 @@ def train_weakseg(cfg):
                 if scheduler is not None:
                     scheduler.step()
 
+            epoch_loss_sum += float(loss.item())   # NEW
+            n_batches += 1                         # NEW
+
             pbar.set_postfix(loss=float(loss.item()), lr=opt.param_groups[0]['lr'])
+
+        # NEW: mean loss for this epoch
+        mean_train_loss = epoch_loss_sum / max(1, n_batches)
 
         # ---- validation ----
         model.eval()
@@ -241,6 +290,14 @@ def train_weakseg(cfg):
         f1 = macro_f1(ys, yh, num_classes=len(emotions))
         rec = uar(ys, yh, num_classes=len(emotions))
         print(f"Val Macro-F1={f1:.4f} UAR={rec:.4f}")
+
+        # NEW: append epoch stats to CSV log
+        with open(weakseg_log_path, 'a', newline='') as f_log:
+            writer = csv.writer(f_log)
+            writer.writerow([ep + 1,
+                             f"{mean_train_loss:.6f}",
+                             f"{f1:.4f}",
+                             f"{rec:.4f}"])
 
         if f1 > best:
             best = f1
